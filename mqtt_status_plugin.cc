@@ -388,57 +388,77 @@ private:
 
   // Worker: waits (optionally) for Transcriber/Storage, then publishes ONCE
   void run_publish_worker_() {
-    while (true) {
-      PublishJob job;
-      {
-        std::unique_lock<std::mutex> lk(q_mu_);
-        q_cv_.wait(lk, [&]{ return q_stop_ || !q_.empty(); });
-        if (q_stop_ && q_.empty()) break;
-        job = q_.front(); q_.pop();
-      }
-
-      // Decide gates
-      bool need_transcriber = (wait_transcriber_mode_ == WaitMode::Always);
-      bool need_storage     = (wait_storage_mode_     == WaitMode::Always);
-
-      if (wait_transcriber_mode_ == WaitMode::Auto) {
-        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(presence_probe_ms_);
-        if (!transcriber_present_(job.json_path)) {
-          while (std::chrono::steady_clock::now() < until && !transcriber_present_(job.json_path)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-          }
-        }
-        need_transcriber = transcriber_present_(job.json_path);
-      }
-      if (wait_storage_mode_ == WaitMode::Auto) {
-        need_storage = storage_present_(job.json_path);
-      }
-
-      const bool wait_forever = (wait_timeout_ms_ < 0);
-      const auto deadline = std::chrono::steady_clock::now()
-                          + std::chrono::milliseconds(std::max<long>(0, wait_timeout_ms_));
-
-      // Wait loop
-      while (true) {
-        bool t_ok = !need_transcriber || has_transcript_block_(job.json_path);
-        bool s_ok = true;
-        if (need_storage) {
-          if (file_exists_(job.json_path)) s_ok = has_storage_uploaded_(job.json_path);
-          else s_ok = true; // JSON deleted after upload => treat as done
-        }
-
-        if (t_ok && s_ok) break;
-        if (!wait_forever && std::chrono::steady_clock::now() >= deadline) break;
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      }
-
-      // Send (audio first if enabled), then the call_end JSON once
-      if (mqtt_audio) (void) send_audio(job.call_info);
-      auto call_json = build_call_end_json_(job.call_info);
-      (void) send_json(call_json, "call", "call_end", topic_status, false);
+  while (true) {
+    PublishJob job;
+    {
+      std::unique_lock<std::mutex> lk(q_mu_);
+      q_cv_.wait(lk, [&]{ return q_stop_ || !q_.empty(); });
+      if (q_stop_ && q_.empty()) break;
+      job = q_.front(); q_.pop();
     }
+
+    // Decide gates
+    bool need_transcriber = (wait_transcriber_mode_ == WaitMode::Always);
+    bool need_storage     = (wait_storage_mode_     == WaitMode::Always);
+
+    if (wait_transcriber_mode_ == WaitMode::Auto) {
+      auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(presence_probe_ms_);
+      if (!transcriber_present_(job.json_path)) {
+        while (std::chrono::steady_clock::now() < until && !transcriber_present_(job.json_path)) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+      }
+      need_transcriber = transcriber_present_(job.json_path);
+    }
+    if (wait_storage_mode_ == WaitMode::Auto) {
+      need_storage = storage_present_(job.json_path);
+    }
+
+    const bool wait_forever = (wait_timeout_ms_ < 0);
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(std::max<long>(0, wait_timeout_ms_));
+
+    // Wait loop
+    while (true) {
+      bool t_ok = !need_transcriber || has_transcript_block_(job.json_path);
+      bool s_ok = true;
+      if (need_storage) {
+        if (file_exists_(job.json_path)) s_ok = has_storage_uploaded_(job.json_path);
+        else s_ok = true; // JSON deleted after upload => treat as done
+      }
+
+      if (t_ok && s_ok) break;
+      if (!wait_forever && std::chrono::steady_clock::now() >= deadline) break;
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // Build base payload
+    if (mqtt_audio) (void) send_audio(job.call_info);
+    auto call_json = build_call_end_json_(job.call_info);
+
+    // --- Merge optional blocks from per-call status JSON (transcriber/storage_uploader) ---
+    try {
+      if (file_exists_(job.json_path)) {
+        std::ifstream in(job.json_path);
+        // Parse into ordered_json to match call_json's type
+        nlohmann::ordered_json sj = nlohmann::ordered_json::parse(in);
+        if (sj.is_object()) {
+          if (sj.contains("transcriber") && sj["transcriber"].is_object())
+            call_json["transcriber"] = sj["transcriber"];
+          if (sj.contains("storage_uploader") && sj["storage_uploader"].is_object())
+            call_json["storage_uploader"] = sj["storage_uploader"];
+        }
+      }
+    } catch (...) {
+      // Non-fatal: publish base payload if merge fails
+    }
+
+    // Publish once
+    (void) send_json(call_json, "call", "call_end", topic_status, false);
   }
+}
+
 
   // Custom backend to send log messages to parent Mqtt_Status plugin
   class MqttSinkBackend : public logging::sinks::text_ostream_backend
