@@ -583,7 +583,6 @@ public:
           {"analog_levels", sys->get_analog_levels()},
           {"digital_levels", sys->get_digital_levels()},
           {"audio_archive", sys->get_audio_archive()},
-          {"upload_script", sys->get_upload_script()},
           {"record_unkown", sys->get_record_unknown()},
           {"call_log", sys->get_call_log()}};
 
