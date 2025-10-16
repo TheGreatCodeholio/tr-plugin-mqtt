@@ -242,6 +242,73 @@ private:
     return def;
   }
 
+  // Publish audio for a completed call (m4a or wav) to topic_status + "/audio"
+  int send_audio(const Call_Data_t& call_info)
+  {
+    if (!mqtt_audio || !mqtt_connected) return 0;
+
+    auto path_exists = [&](const std::string& p){
+      std::error_code ec; return !p.empty() && std::filesystem::exists(p, ec);
+    };
+
+    // Choose audio path based on config
+    std::string atype = mqtt_audio_type;
+    std::transform(atype.begin(), atype.end(), atype.begin(), ::tolower);
+
+    std::string audio_path;
+    if (atype == "m4a") {
+      if (path_exists(call_info.converted))        audio_path = call_info.converted;
+      else if (path_exists(call_info.filename))    audio_path = call_info.filename; // fallback
+    } else { // "wav" (default) or anything else => prefer wav, fallback to m4a
+      if (path_exists(call_info.filename))         audio_path = call_info.filename;
+      else if (path_exists(call_info.converted))   audio_path = call_info.converted; // fallback
+    }
+
+    if (audio_path.empty() || !path_exists(audio_path)) {
+      BOOST_LOG_TRIVIAL(warning) << log_prefix << "Audio file not found for call_num=" << call_info.call_num;
+      return 0; // not fatal
+    }
+
+    // Base64 encode
+    std::string b64;
+    try {
+      b64 = file_to_base64(audio_path);
+    } catch (const std::exception& e) {
+      BOOST_LOG_TRIVIAL(error) << log_prefix << "Base64 encode failed: " << e.what();
+      return 1;
+    }
+
+    // Guess mimetype
+    std::string lower = audio_path;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::string mimetype = (lower.size() >= 4 && lower.substr(lower.size()-4) == ".m4a")
+                             ? "audio/mp4"
+                             : "audio/wav";
+
+    // Build payload (keeps same id scheme as call_end)
+    std::string call_id = boost::lexical_cast<std::string>(call_info.sys_num) + "_" +
+                          boost::lexical_cast<std::string>(call_info.talkgroup) + "_" +
+                          boost::lexical_cast<std::string>(call_info.start_time);
+
+    nlohmann::ordered_json audio_json = {
+      {"id", call_id},
+      {"sys_num", call_info.sys_num},
+      {"sys_name", call_info.short_name},
+      {"talkgroup", call_info.talkgroup},
+      {"start_time", call_info.start_time},
+      {"stop_time", call_info.stop_time},
+      {"length", round_float(call_info.length)},
+      {"filename", get_filename_from_path(audio_path)},
+      {"mimetype", mimetype},
+      {"encoding", "base64"},
+      {"data", b64}
+    };
+
+    // Publish to <topic_status>/audio
+    return send_json(audio_json, "audio", "audio", topic_status, false);
+  }
+
+
   // --------- Publish queue (defers send until gates satisfied) ---------
   struct PublishJob {
     Call_Data_t call_info;
