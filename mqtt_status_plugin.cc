@@ -27,6 +27,11 @@
 #include <boost/log/sinks/sync_frontend.hpp>
 #include <boost/log/sinks/text_ostream_backend.hpp>
 #include <boost/crc.hpp>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <filesystem>
 
 using namespace std;
 namespace logging = boost::log;
@@ -169,6 +174,205 @@ class Mqtt_Status : public Plugin_Api, public virtual mqtt::callback
       {7, "SUPERSEDED"}};
 
 private:
+
+  enum class WaitMode { Auto, Always, Never };
+
+  WaitMode wait_transcriber_mode_ = WaitMode::Auto;
+  WaitMode wait_storage_mode_     = WaitMode::Auto;
+
+  long wait_timeout_ms_ = 15000;      // total max wait; -1 = forever
+  int  presence_probe_ms_ = 250;      // quick probe to detect plugin presence
+
+  // --- JSON presence / status checks ---
+  static bool file_exists_(const std::string& p) {
+    std::error_code ec; return !p.empty() && std::filesystem::exists(p, ec);
+  }
+
+  static bool json_has(const std::string& path, const char* key) {
+    try {
+      if (!file_exists_(path)) return false;
+      std::ifstream in(path);
+      nlohmann::json j = nlohmann::json::parse(in);
+      return j.contains(key);
+    } catch (...) { return false; }
+  }
+
+  static bool transcriber_present_(const std::string& path) {
+    return json_has(path, "transcriber");
+  }
+
+  static bool has_transcript_block_(const std::string& path) {
+    try {
+      if (!file_exists_(path)) return false;
+      std::ifstream in(path);
+      nlohmann::json j = nlohmann::json::parse(in);
+      if (!j.contains("transcriber")) return false;
+      const auto& t = j["transcriber"];
+      if (!t.is_object()) return false;
+      // Prefer explicit status if present; otherwise, a non-empty transcript
+      if (t.contains("status") && t["status"].is_string())
+        return t["status"].get<std::string>() == "done";
+      return t.contains("transcript") && t["transcript"].is_string() &&
+             !t["transcript"].get<std::string>().empty();
+    } catch (...) { return false; }
+  }
+
+  static bool storage_present_(const std::string& path) {
+    return json_has(path, "storage_uploader");
+  }
+
+  static bool has_storage_uploaded_(const std::string& path) {
+    try {
+      if (!file_exists_(path)) return false;
+      std::ifstream in(path);
+      nlohmann::json j = nlohmann::json::parse(in);
+      if (!j.contains("storage_uploader")) return false;
+      const auto& su = j["storage_uploader"];
+      return su.is_object() && su.value("status", "") == "uploaded";
+    } catch (...) { return false; }
+  }
+
+  // small parser
+  static WaitMode parse_wait_mode_(const nlohmann::json& cfg, const char* key, WaitMode def) {
+    std::string v = cfg.value(key, "auto");
+    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+    if (v == "auto")   return WaitMode::Auto;
+    if (v == "true" || v == "yes" || v == "always") return WaitMode::Always;
+    if (v == "false" || v == "no"  || v == "never")  return WaitMode::Never;
+    return def;
+  }
+
+  // --------- Publish queue (defers send until gates satisfied) ---------
+  struct PublishJob {
+    Call_Data_t call_info;
+    std::string json_path;
+  };
+
+  // queue infra
+  std::mutex q_mu_;
+  std::condition_variable q_cv_;
+  std::queue<PublishJob> q_;
+  std::thread pub_worker_;
+  bool q_stop_{false};
+
+  // enqueue
+  void enqueue_publish_(const PublishJob& j) {
+    std::lock_guard<std::mutex> lk(q_mu_);
+    q_.push(j);
+    q_cv_.notify_one();
+  }
+
+  // Build the final call_end payload exactly like the old inline code
+  nlohmann::ordered_json build_call_end_json_(const Call_Data_t& call_info) {
+    System* sys = find_system(call_info.sys_num);
+    std::string patch_string = patches_to_str(call_info.patched_talkgroups);
+
+    nlohmann::ordered_json call_json = {
+        {"id", boost::lexical_cast<std::string>(call_info.sys_num) + "_" +
+                boost::lexical_cast<std::string>(call_info.talkgroup) + "_" +
+                boost::lexical_cast<std::string>(call_info.start_time)},
+        {"call_num", call_info.call_num},
+        {"sys_num", call_info.sys_num},
+        {"sys_name", call_info.short_name},
+        {"freq", call_info.freq},
+        {"unit", call_info.transmission_source_list.size() ? call_info.transmission_source_list[0].source : 0},
+        {"unit_alpha_tag", call_info.transmission_source_list.size() ? call_info.transmission_source_list[0].tag : ""},
+        {"talkgroup", call_info.talkgroup},
+        {"talkgroup_alpha_tag", call_info.talkgroup_alpha_tag},
+        {"talkgroup_description", call_info.talkgroup_description},
+        {"talkgroup_group", call_info.talkgroup_group},
+        {"talkgroup_tag", call_info.talkgroup_tag},
+        {"talkgroup_patches", patch_string},
+        {"elapsed", call_info.stop_time - call_info.start_time},
+        {"length", round_float(call_info.length)},
+        {"call_state", -1},
+        {"call_state_type", "COMPLETED"},
+        {"mon_state", 0},
+        {"mon_state_type", "UNSPECIFIED"},
+        {"audio_type", call_info.audio_type},
+        {"phase2_tdma", call_info.phase2_tdma},
+        {"tdma_slot", call_info.tdma_slot},
+        {"analog", ((call_info.audio_type == "analog") ? true : false)},
+        {"rec_num", call_info.recorder_num},
+        {"src_num", call_info.source_num},
+        {"rec_state", 6},
+        {"rec_state_type", "STOPPED"},
+        {"conventional", ((sys->get_system_type()).find("conventional") == std::string::npos ? false : true)},
+        {"encrypted", call_info.encrypted},
+        {"emergency", call_info.emergency},
+        {"start_time", call_info.start_time},
+        {"stop_time", call_info.stop_time},
+        {"process_call_time", call_info.process_call_time},
+        {"error_count", call_info.error_count},
+        {"spike_count", call_info.spike_count},
+        {"retry_attempt", call_info.retry_attempt},
+        {"freq_error", call_info.freq_error},
+        {"signal", round_float(call_info.signal)},
+        {"noise", round_float(call_info.noise)},
+        {"call_filename", call_info.filename}
+    };
+
+    if (call_info.compress_wav) {
+      call_json["call_filename"] = call_info.converted;
+    }
+
+    return call_json;
+  }
+
+  // Worker: waits (optionally) for Transcriber/Storage, then publishes ONCE
+  void run_publish_worker_() {
+    while (true) {
+      PublishJob job;
+      {
+        std::unique_lock<std::mutex> lk(q_mu_);
+        q_cv_.wait(lk, [&]{ return q_stop_ || !q_.empty(); });
+        if (q_stop_ && q_.empty()) break;
+        job = q_.front(); q_.pop();
+      }
+
+      // Decide gates
+      bool need_transcriber = (wait_transcriber_mode_ == WaitMode::Always);
+      bool need_storage     = (wait_storage_mode_     == WaitMode::Always);
+
+      if (wait_transcriber_mode_ == WaitMode::Auto) {
+        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(presence_probe_ms_);
+        if (!transcriber_present_(job.json_path)) {
+          while (std::chrono::steady_clock::now() < until && !transcriber_present_(job.json_path)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          }
+        }
+        need_transcriber = transcriber_present_(job.json_path);
+      }
+      if (wait_storage_mode_ == WaitMode::Auto) {
+        need_storage = storage_present_(job.json_path);
+      }
+
+      const bool wait_forever = (wait_timeout_ms_ < 0);
+      const auto deadline = std::chrono::steady_clock::now()
+                          + std::chrono::milliseconds(std::max<long>(0, wait_timeout_ms_));
+
+      // Wait loop
+      while (true) {
+        bool t_ok = !need_transcriber || has_transcript_block_(job.json_path);
+        bool s_ok = true;
+        if (need_storage) {
+          if (file_exists_(job.json_path)) s_ok = has_storage_uploaded_(job.json_path);
+          else s_ok = true; // JSON deleted after upload => treat as done
+        }
+
+        if (t_ok && s_ok) break;
+        if (!wait_forever && std::chrono::steady_clock::now() >= deadline) break;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+
+      // Send (audio first if enabled), then the call_end JSON once
+      if (mqtt_audio) (void) send_audio(job.call_info);
+      auto call_json = build_call_end_json_(job.call_info);
+      (void) send_json(call_json, "call", "call_end", topic_status, false);
+    }
+  }
+
   // Custom backend to send log messages to parent Mqtt_Status plugin
   class MqttSinkBackend : public logging::sinks::text_ostream_backend
   {
@@ -506,101 +710,12 @@ public:
       }
     }
 
-    nlohmann::ordered_json call_json = {
-        {"id", boost::lexical_cast<std::string>(call_info.sys_num) + "_" + boost::lexical_cast<std::string>(call_info.talkgroup) + "_" + boost::lexical_cast<std::string>(call_info.start_time)},
-        {"call_num", call_info.call_num},
-        {"sys_num", call_info.sys_num},
-        {"sys_name", call_info.short_name},
-        {"freq", call_info.freq},
-        {"unit", call_info.transmission_source_list[0].source},
-        {"unit_alpha_tag", call_info.transmission_source_list[0].tag},
-        {"talkgroup", call_info.talkgroup},
-        {"talkgroup_alpha_tag", call_info.talkgroup_alpha_tag},
-        {"talkgroup_description", call_info.talkgroup_description},
-        {"talkgroup_group", call_info.talkgroup_group},
-        {"talkgroup_tag", call_info.talkgroup_tag},
-        {"talkgroup_patches", patch_string},
-        {"elapsed", call_info.stop_time - call_info.start_time},
-        {"length", round_float(call_info.length)},
-        {"call_state", -1},
-        {"call_state_type", "COMPLETED"},
-        {"mon_state", 0},
-        {"mon_state_type", "UNSPECIFIED"},
-        {"audio_type", call_info.audio_type},
-        {"phase2_tdma", call_info.phase2_tdma},
-        {"tdma_slot", call_info.tdma_slot},
-        {"analog", ((call_info.audio_type == "analog") ? true : false)},
-        {"rec_num", call_info.recorder_num},
-        {"src_num", call_info.source_num},
-        {"rec_state", 6},
-        {"rec_state_type", "STOPPED"},
-        {"conventional", ((sys->get_system_type()).find("conventional") == std::string::npos ? false : true)},
-        {"encrypted", call_info.encrypted},
-        {"emergency", call_info.emergency},
-        {"start_time", call_info.start_time},
-        {"stop_time", call_info.stop_time},
-        {"process_call_time", call_info.process_call_time},
-        {"error_count", call_info.error_count},
-        {"spike_count", call_info.spike_count},
-        {"retry_attempt", call_info.retry_attempt},
-        {"freq_error", call_info.freq_error},
-        {"signal", round_float(call_info.signal)},
-        {"noise", round_float(call_info.noise)},
-        {"call_filename", call_info.filename}};
+    PublishJob j;
+    j.call_info = call_info;
+    j.json_path = call_info.status_filename;
+    enqueue_publish_(j);
 
-    if (call_info.compress_wav)
-    {
-      call_json["call_filename"] = call_info.converted;
-    }
-
-    int ret = 0;
-    
-    if (mqtt_audio)
-    {
-      ret = send_audio(call_info);
-    }
-
-    return (ret || send_json(call_json, "call", "call_end", topic_status, false));
-  }
-
-  int send_audio(Call_Data_t call_info) {
-    // Encode the audio file to base64
-
-    // Prepare the JSON object
-    nlohmann::ordered_json call_json = {
-        {"audio_wav_base64", ""},
-        {"audio_m4a_base64", ""},       
-        {"metadata", call_info.call_json}
-    };
-
-    // Add m4a to json if requested and available; record filename
-    if (((mqtt_audio_type == "m4a") || (mqtt_audio_type == "both")) && call_info.compress_wav)
-    {
-      call_json["audio_m4a_base64"] = file_to_base64(call_info.converted);
-      call_json["metadata"]["filename"] = get_filename_from_path(call_info.converted);;
-    }
-
-    // Add wav to json if requested; record (or override) filename
-    if ((mqtt_audio_type == "wav") || (mqtt_audio_type == "both"))
-    {
-      call_json["audio_wav_base64"] = file_to_base64(call_info.filename);
-      call_json["metadata"]["filename"] = get_filename_from_path(call_info.filename);
-    }
-
-    int ret = send_json(call_json, "call", "audio", topic_status, false);
-    
-    int size = call_json.dump().size();    
-    std::string loghdr = log_header(call_info.short_name,call_info.call_num,call_info.talkgroup_display,call_info.freq);
-
-    if (ret == 0) {
-      BOOST_LOG_TRIVIAL(info) << loghdr << "MQTT Call Upload Success - packet size: " << size;
-      return 0;
-    } 
-    else 
-    {
-      BOOST_LOG_TRIVIAL(error) << loghdr << "MQTT Call Upload error - packet size: " << size;
-      return 1;
-    }
+    return 0;
   }
 
 
@@ -721,6 +836,10 @@ public:
     mqtt_audio = config_data.value("mqtt_audio", false);
     mqtt_audio_type = config_data.value("mqtt_audio_type", "wav");
     mqtt_client_id = config_data.value("client_id", generate_client_id());
+    wait_transcriber_mode_ = parse_wait_mode_(config_data, "wait_for_transcriber", WaitMode::Auto);
+    wait_storage_mode_     = parse_wait_mode_(config_data, "wait_for_storage",     WaitMode::Auto);
+    wait_timeout_ms_       = config_data.value("wait_timeout_ms", 15000);
+    presence_probe_ms_     = config_data.value("presence_probe_ms", 250);
 
     // Enable topics and clean up stray '/' if encountered
     if (topic_status != "")
@@ -799,6 +918,21 @@ public:
       boost::shared_ptr<mqtt_sink_t> mqtt_sink = boost::make_shared<mqtt_sink_t>(boost::make_shared<MqttSinkBackend>(*this));
       logging::core::get()->add_sink(mqtt_sink);
     }
+
+    q_stop_ = false;
+    pub_worker_ = std::thread(&Mqtt_Status::run_publish_worker_, this);
+
+    return 0;
+  }
+
+  int stop() override {
+    // stop publish worker
+    {
+      std::lock_guard<std::mutex> lk(q_mu_);
+      q_stop_ = true;
+    }
+    q_cv_.notify_all();
+    if (pub_worker_.joinable()) pub_worker_.join();
 
     return 0;
   }
