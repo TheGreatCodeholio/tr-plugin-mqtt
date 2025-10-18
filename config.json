@@ -41,8 +41,8 @@
             "mqtt_audio_type": "wav", // "wav" | "m4a" (used if mqtt_audio=true)
 
             // Publish gating (wait for other plugins to enrich JSON before call_end)
-            "wait_for_transcriber": "auto", // "auto" | "always" | "never"
-            "wait_for_storage": "auto",     // "auto" | "always" | "never"
+            "wait_for_transcriber": "always", // "auto" | "always" | "never"
+            "wait_for_storage": "always",     // "auto" | "always" | "never"
             "wait_timeout_ms": 15000,       // max time to wait for those blocks
             "presence_probe_ms": 250        // quick probe to detect plugin presence
         }
