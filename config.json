@@ -1,31 +1,50 @@
 {
     "ver": 2,
     "instanceId": "city_center",
-    "sources":   [{
-        "center": 855700000,
-        "rate": 2048000,
-        "error": -300,
-        "gain": 42,
-        "digitalRecorders": 4,
-        "driver": "osmosdr"
-    }
+    "sources": [
+        {
+            "center": 855700000,
+            "rate": 2048000,
+            "error": -300,
+            "gain": 42,
+            "digitalRecorders": 4,
+            "driver": "osmosdr"
+        }
     ],
-    "systems": [{
-        "control_channels": [855462500],
-        "type": "p25",
-        "shortName": "dcfems",
-        "modulation": "qpsk"
-    }],
+    "systems": [
+        {
+            "control_channels": [855462500],
+            "type": "p25",
+            "shortName": "dcfems",
+            "modulation": "qpsk"
+        }
+    ],
     "plugins": [
-    {
-        "name": "MQTT Everything!",
-        "client_id": "tr-status",
-        "library": "libmqtt_status_plugin.so",
-        "broker": "tcp://io.adafruit.com:1883",
-        "topic": "robotastic/feeds",
-        "unit_topic": "robotastic/units",
-        "mqtt_audio": false,
-        "username": "robotastic",
-        "password": ""
-    }]
+        {
+            "name": "MQTT Everything!",
+            "library": "libmqtt_status_plugin.so",
+
+            "broker": "tcp://io.adafruit.com:1883",
+            "username": "robotastic",
+            "password": "",
+
+            "client_id": "tr-status-city_center",
+
+            "topic": "robotastic/feeds",            // status/call_* messages
+            "unit_topic": "robotastic/units",       // unit events (on/off/join/…)
+            "message_topic": "robotastic/trunk",    // optional: raw trunk messages
+
+            "qos": 0,                 // 0|1|2
+            "console_logs": true,     // publish boost::log to <topic>/trunk_recorder/console
+
+            "mqtt_audio": false,      // publish audio as base64 on <topic>/audio
+            "mqtt_audio_type": "wav", // "wav" | "m4a" (used if mqtt_audio=true)
+
+            // Publish gating (wait for other plugins to enrich JSON before call_end)
+            "wait_for_transcriber": "auto", // "auto" | "always" | "never"
+            "wait_for_storage": "auto",     // "auto" | "always" | "never"
+            "wait_timeout_ms": 15000,       // max time to wait for those blocks
+            "presence_probe_ms": 250        // quick probe to detect plugin presence
+        }
+    ]
 }
