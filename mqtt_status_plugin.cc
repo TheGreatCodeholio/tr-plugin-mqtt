@@ -343,11 +343,11 @@ public:
     }
 
     config_json["capture_dir"] = tr_config->capture_dir;
-    config_json["upload_server"] = tr_config->upload_server;
     config_json["call_timeout"] = tr_config->call_timeout;
     config_json["log_file"] = tr_config->log_file;
     config_json["instance_id"] = tr_config->instance_id;
     config_json["instance_key"] = tr_config->instance_key;
+    
     if (tr_config->broadcast_signals == true)
     {
       config_json["broadcast_signals"] = tr_config->broadcast_signals;
@@ -468,8 +468,10 @@ public:
   //   TRUNK-RECORDER PLUGIN API: Called after a call ends
   //   MQTT: topic/call_end
   //   MQTT: topic_unit/shortname/end
-  int call_end(Call_Data_t call_info) override
+  int call_end(Call_Data_t &call_info, nlohmann::ordered_json &plugin_ctx) override
   {
+    (void)plugin_ctx;
+
     System *sys = find_system(call_info.sys_num);
     std::string patch_string = patches_to_str(call_info.patched_talkgroups);
 
