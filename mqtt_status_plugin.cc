@@ -61,6 +61,7 @@ class Mqtt_Status : public Plugin_Api, public virtual mqtt::callback
   bool message_enabled = false;
   bool console_enabled = false;
   bool mqtt_audio = false;
+  bool mqtt_json = false;
   std::string mqtt_audio_type;
   std::string log_prefix;
   time_t call_resend_time = time(NULL);
@@ -559,51 +560,45 @@ public:
     }
 
     int ret = 0;
-    
-    if (mqtt_audio)
-    {
-      ret = send_audio(call_info);
-    }
+
+    if (mqtt_json || mqtt_audio)
+      {
+      ret = send_call_payload(call_info);
+      }
 
     return (ret || send_json(call_json, "call", "call_end", topic_status, false));
   }
 
-  int send_audio(Call_Data_t call_info) {
-    // Encode the audio file to base64
-
-    // Prepare the JSON object
+  int send_call_payload(Call_Data_t call_info) {
     nlohmann::ordered_json call_json = {
-        {"audio_wav_base64", ""},
-        {"audio_m4a_base64", ""},       
-        {"metadata", call_info.call_json}
+      {"audio_wav_base64", ""},
+      {"audio_m4a_base64", ""},
+      {"metadata", call_info.call_json}
     };
 
-    // Add m4a to json if requested and available; record filename
-    if (((mqtt_audio_type == "m4a") || (mqtt_audio_type == "both")) && call_info.compress_wav)
+    if (mqtt_audio && ((mqtt_audio_type == "m4a") || (mqtt_audio_type == "both")) && call_info.compress_wav)
     {
       call_json["audio_m4a_base64"] = file_to_base64(call_info.converted);
-      call_json["metadata"]["filename"] = get_filename_from_path(call_info.converted);;
+      call_json["metadata"]["filename"] = get_filename_from_path(call_info.converted);
     }
 
-    // Add wav to json if requested; record (or override) filename
-    if ((mqtt_audio_type == "wav") || (mqtt_audio_type == "both"))
+    if (mqtt_audio && ((mqtt_audio_type == "wav") || (mqtt_audio_type == "both")))
     {
       call_json["audio_wav_base64"] = file_to_base64(call_info.filename);
       call_json["metadata"]["filename"] = get_filename_from_path(call_info.filename);
     }
 
     int ret = send_json(call_json, "call", "audio", topic_status, false);
-    
-    int size = call_json.dump().size();    
-    std::string loghdr = log_header(call_info.short_name,call_info.call_num,call_info.talkgroup_display,call_info.freq);
+
+    int size = call_json.dump().size();
+    std::string loghdr = log_header(call_info.short_name, call_info.call_num,
+                                    call_info.talkgroup_display, call_info.freq);
 
     if (ret == 0) {
-      BOOST_LOG_TRIVIAL(info) << loghdr << "MQTT Call Upload Success - packet size: " << size;
+      BOOST_LOG_TRIVIAL(info) << loghdr << "MQTT Call Payload Success - packet size: " << size;
       return 0;
-    } 
-    else 
-    {
-      BOOST_LOG_TRIVIAL(error) << loghdr << "MQTT Call Upload error - packet size: " << size;
+    } else {
+      BOOST_LOG_TRIVIAL(error) << loghdr << "MQTT Call Payload Error - packet size: " << size;
       return 1;
     }
   }
@@ -725,6 +720,7 @@ public:
     mqtt_qos = config_data.value("qos", 0);
     mqtt_audio = config_data.value("mqtt_audio", false);
     mqtt_audio_type = config_data.value("mqtt_audio_type", "wav");
+    mqtt_json = config_data.value("mqtt_json", false);
     mqtt_client_id = config_data.value("client_id", generate_client_id());
 
     // Enable topics and clean up stray '/' if encountered
@@ -762,6 +758,7 @@ public:
     BOOST_LOG_TRIVIAL(info) << log_prefix << "Console Message Topic:  " << ((console_enabled == false) ? "[disabled]" : topic_console + "/console");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT Audio Topic:       " << ((mqtt_audio == false) ? "[disabled]" : topic_status + "/audio");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT Audio (wav/m4a):   " << ((mqtt_audio == false) ? "[disabled]" : mqtt_audio_type);
+    BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT JSON Topic:        " << ((mqtt_json == false) ? "[disabled]" : topic_status + "/call_end");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT QOS:               " << mqtt_qos;
     return 0;
   }
