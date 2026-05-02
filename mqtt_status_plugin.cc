@@ -758,7 +758,7 @@ public:
     BOOST_LOG_TRIVIAL(info) << log_prefix << "Console Message Topic:  " << ((console_enabled == false) ? "[disabled]" : topic_console + "/console");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT Audio Topic:       " << ((mqtt_audio == false) ? "[disabled]" : topic_status + "/audio");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT Audio (wav/m4a):   " << ((mqtt_audio == false) ? "[disabled]" : mqtt_audio_type);
-    BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT JSON Topic:        " << ((mqtt_json == false) ? "[disabled]" : topic_status + "/call_end");
+    BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT JSON Topic:        " << ((mqtt_json == false) ? "[disabled]" : topic_status + "/audio");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT QOS:               " << mqtt_qos;
     return 0;
   }
