@@ -1041,7 +1041,8 @@ Overview of trunking messages that have been decoded.
 
 ## console
 
-Console log messages forwarded over MQTT.
+Console log messages forwarded over MQTT. Only messages at or above the
+configured `console_logs_level` (default `info`) are sent.
 
 `topic/trunk_recorder/console`
 
