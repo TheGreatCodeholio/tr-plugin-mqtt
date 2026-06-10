@@ -106,8 +106,9 @@ See the included [config.json](./config.json) for an example how to load this pl
         "username": "robotastic",
         "password": "",
         "console_logs": true,
+        "console_logs_level": "info",
         "mqtt_audio": false,
-        "mqtt_qos": 0,
+        "mqtt_qos": 0
     }]
 ```
 
