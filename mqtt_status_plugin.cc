@@ -60,6 +60,7 @@ class Mqtt_Status : public Plugin_Api, public virtual mqtt::callback
   bool unit_enabled = false;
   bool message_enabled = false;
   bool console_enabled = false;
+  logging::trivial::severity_level console_level = logging::trivial::info;
   bool mqtt_audio = false;
   std::string mqtt_audio_type;
   std::string log_prefix;
@@ -720,6 +721,12 @@ public:
     topic_unit = config_data.value("unit_topic", "");
     topic_message = config_data.value("message_topic", "");
     console_enabled = config_data.value("console_logs", false);
+    std::string console_level_str = config_data.value("console_logs_level", "info");
+    if (!logging::trivial::from_string(console_level_str.c_str(), console_level_str.length(), console_level))
+    {
+      BOOST_LOG_TRIVIAL(error) << log_prefix << "Invalid console_logs_level \"" << console_level_str << "\"; using \"info\"";
+      console_level = logging::trivial::info;
+    }
     mqtt_qos = config_data.value("qos", 0);
     mqtt_audio = config_data.value("mqtt_audio", false);
     mqtt_audio_type = config_data.value("mqtt_audio_type", "wav");
@@ -758,6 +765,7 @@ public:
     BOOST_LOG_TRIVIAL(info) << log_prefix << "Unit Topic:             " << ((topic_unit == "") ? "[disabled]" : topic_unit + "/shortname");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "Trunk Message Topic:    " << ((topic_message == "") ? "[disabled]" : topic_message + "/shortname");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "Console Message Topic:  " << ((console_enabled == false) ? "[disabled]" : topic_console + "/console");
+    BOOST_LOG_TRIVIAL(info) << log_prefix << "Console Message Level:  " << ((console_enabled == false) ? "[disabled]" : logging::trivial::to_string(console_level));
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT Audio Topic:       " << ((mqtt_audio == false) ? "[disabled]" : topic_status + "/audio");
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT Audio (wav/m4a):   " << ((mqtt_audio == false) ? "[disabled]" : mqtt_audio_type);
     BOOST_LOG_TRIVIAL(info) << log_prefix << "MQTT QOS:               " << mqtt_qos;
@@ -800,6 +808,7 @@ public:
       typedef logging::sinks::synchronous_sink<MqttSinkBackend> mqtt_sink_t;
 
       boost::shared_ptr<mqtt_sink_t> mqtt_sink = boost::make_shared<mqtt_sink_t>(boost::make_shared<MqttSinkBackend>(*this));
+      mqtt_sink->set_filter(logging::trivial::severity >= console_level);
       logging::core::get()->add_sink(mqtt_sink);
     }
 
